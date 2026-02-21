@@ -19,6 +19,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "verl",
     "loguru",
     "tqdm",
     "ninja",
@@ -106,6 +107,7 @@ transformer-engine-torch = [{requirement = "torch", match-runtime = true}, "buil
 flash-attn = { FLASH_ATTENTION_SKIP_CUDA_BUILD = "TRUE"}
 
 [tool.uv.sources]
+verl = { git = "https://github.com/limenlp/verl.git", branch = "main" }
 skyrl-gym = { path = "./skyrl-gym" , editable = true }
 sglang = { path = "../../sglang/python", editable = true, marker = "extra == 'sglang' or extra == 'b200'" }
 nmoe = { path = "../../nmoe", editable = true, marker = "extra == 'b200'" }
