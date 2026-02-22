@@ -9,6 +9,14 @@ data:
   train_data: ["${oc.env:HOME}/data/gsm8k/train.parquet"]
   val_data: ["${oc.env:HOME}/data/gsm8k/validation.parquet"]
 
+curriculum:
+  enabled: false
+  initial_difficulty: 0.0  # paper starts at 0 (easiest); scale matches dataset difficulty column
+  update_interval: 1       # update target difficulty every N global steps
+  eta: 50                  # step size (paper: 50, scales reward delta to difficulty range 0-100)
+  alpha: 2                 # sensitivity of tanh (paper: 2)
+  beta: 0.5                # target reward level; update pushes model toward ~50% success rate
+
 trainer:
   placement:
     colocate_all: true

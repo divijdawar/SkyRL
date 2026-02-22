@@ -117,7 +117,25 @@ class RayPPOTrainer:
         needs a batch size of 1, among other features.
         Defaults to `trainer_utils.build_dataloader` with `is_train=True`.
         """
-        self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
+        if self.cfg.get("curriculum", {}).get("enabled", False):
+            from torchdata.stateful_dataloader import StatefulDataLoader
+            from skyrl_train.dataset import SkyRLCurriculumSampler
+            self.curriculum_sampler = SkyRLCurriculumSampler(
+                data_source=self.train_dataset.dataframe,
+                batch_size=self.cfg.trainer.train_batch_size,
+                target_difficulty=self.cfg.curriculum.initial_difficulty,
+            )
+            self.train_dataloader = StatefulDataLoader(
+                self.train_dataset,
+                batch_sampler=self.curriculum_sampler,
+                collate_fn=self.train_dataset.collate_fn,
+                num_workers=0 if self.cfg.generator.enable_http_endpoint else 8,
+            )
+            logger.info(
+                f"Curriculum sampling enabled. Initial target difficulty: {self.cfg.curriculum.initial_difficulty}"
+            )
+        else:
+            self.train_dataloader = build_dataloader(self.cfg, self.train_dataset, is_train=True)
         self.total_training_steps = len(self.train_dataloader) * self.cfg.trainer.epochs
 
     @torch.no_grad()
@@ -317,6 +335,32 @@ class RayPPOTrainer:
                     with Timer("eval", self.all_timings):
                         eval_metrics = asyncio.run(self.eval())
                         self.all_metrics.update(eval_metrics)
+
+                # curriculum difficulty update — runs before log_payload so the new
+                # target difficulty is included in the same step's metrics.
+                # Implements AdaRFT paper update rule:
+                #   T' = clip(T + η·tanh(α·(R_avg - β)), d_min, d_max)
+                if getattr(self, "curriculum_sampler", None) is not None:
+                    if self.global_step % self.cfg.curriculum.update_interval == 0:
+                        R_avg = self.all_metrics.get("reward/avg_raw_reward")
+                        if R_avg is not None:
+                            import math
+                            cur = self.curriculum_sampler.target_difficulty
+                            eta = self.cfg.curriculum.eta
+                            alpha = self.cfg.curriculum.alpha
+                            beta = self.cfg.curriculum.beta
+                            d_min = float(self.curriculum_sampler.difficulties.min())
+                            d_max = float(self.curriculum_sampler.difficulties.max())
+                            new_target = float(np.clip(
+                                cur + eta * math.tanh(alpha * (R_avg - beta)),
+                                d_min, d_max,
+                            ))
+                            self.curriculum_sampler.update_target_difficulty(new_target)
+                            self.all_metrics["curriculum/target_difficulty"] = new_target
+                            logger.info(
+                                f"Curriculum: R_avg={R_avg:.3f}, "
+                                f"target_difficulty: {cur:.3f} -> {new_target:.3f}"
+                            )
 
                 log_payload = {
                     **self.all_metrics,
