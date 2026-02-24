@@ -344,7 +344,6 @@ class RayPPOTrainer:
                     if self.global_step % self.cfg.curriculum.update_interval == 0:
                         R_avg = self.all_metrics.get("reward/avg_raw_reward")
                         if R_avg is not None:
-                            import math
                             cur = self.curriculum_sampler.target_difficulty
                             eta = self.cfg.curriculum.eta
                             alpha = self.cfg.curriculum.alpha

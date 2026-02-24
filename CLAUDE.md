@@ -18,6 +18,8 @@ Every implementation must be lean and minimal. You must optimize for simplicity 
 When in doubt, you must pause and ask the programmer, never make any assumptions.
 You must explain any change you make and ensure it is properly integrated into the repo. Each change should be accompanied by proper test cases.
 
+## Commands
+
 ### Linting & Formatting
 
 ```bash
