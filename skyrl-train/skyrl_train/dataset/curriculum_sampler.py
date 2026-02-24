@@ -23,3 +23,12 @@ class SkyRLCurriculumSampler(CurriculumSampler):
 
     def __len__(self):
         return len(self.data_source) // self.batch_size
+
+    # ------------------------------------------------------------------
+    # Stateful protocol for torchdata.stateful_dataloader.StatefulDataLoader
+    # ------------------------------------------------------------------
+    def state_dict(self):
+        return {"target_difficulty": self.target_difficulty}
+
+    def load_state_dict(self, state_dict):
+        self.target_difficulty = state_dict["target_difficulty"]

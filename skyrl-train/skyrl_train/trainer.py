@@ -120,6 +120,12 @@ class RayPPOTrainer:
         if self.cfg.get("curriculum", {}).get("enabled", False):
             from torchdata.stateful_dataloader import StatefulDataLoader
             from skyrl_train.dataset import SkyRLCurriculumSampler
+
+            if "difficulty" not in self.train_dataset.dataframe.column_names:
+                raise ValueError(
+                    "Curriculum sampling requires a 'difficulty' column in the dataset, "
+                    f"but found columns: {self.train_dataset.dataframe.column_names}"
+                )
             self.curriculum_sampler = SkyRLCurriculumSampler(
                 data_source=self.train_dataset.dataframe,
                 batch_size=self.cfg.trainer.train_batch_size,
@@ -1269,6 +1275,8 @@ class RayPPOTrainer:
             "global_step": self.global_step,
             "config": self.cfg,
         }
+        if getattr(self, "curriculum_sampler", None) is not None:
+            trainer_state["curriculum_target_difficulty"] = self.curriculum_sampler.target_difficulty
         trainer_state_path = os.path.join(global_step_folder, "trainer_state.pt")
         with io.open_file(trainer_state_path, "wb") as f:
             torch.save(trainer_state, f)
@@ -1386,6 +1394,21 @@ class RayPPOTrainer:
             logger.warning(
                 f"No dataloader state found at {dataloader_state_path}. Dataloader will start from beginning."
             )
+
+        # 2b. Restore curriculum target_difficulty from trainer_state as a fallback
+        # (The primary path is via StatefulDataLoader restoring the sampler's state_dict,
+        #  but this covers cases where that fails or older checkpoints lack it.)
+        if getattr(self, "curriculum_sampler", None) is not None:
+            saved_td = trainer_state.get("curriculum_target_difficulty")
+            if saved_td is not None:
+                current_td = self.curriculum_sampler.target_difficulty
+                if current_td == self.cfg.curriculum.initial_difficulty and current_td != saved_td:
+                    self.curriculum_sampler.target_difficulty = saved_td
+                    logger.info(f"Restored curriculum target_difficulty from trainer_state: {saved_td}")
+                else:
+                    logger.info(f"Curriculum target_difficulty already restored via dataloader state: {current_td}")
+            else:
+                logger.warning("No curriculum_target_difficulty in trainer_state; sampler keeps current value.")
 
         # 3. Load policy checkpoint
         logger.info(f"Loading policy checkpoint from {policy_ckpt_dir}")
