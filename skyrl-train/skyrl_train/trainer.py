@@ -841,14 +841,14 @@ class RayPPOTrainer:
         else:
             avg_rewards: float = return_sums.mean().item()
 
-        avg_response_length = data.metadata["avg_response_length"]
-        data = data.to("cpu")
-
         valid_advantages = torch.masked_select(
             data["advantages"][: num_samples - pad_size, ...], data["response_mask"][: num_samples - pad_size].bool()
         )
         avg_advantages: float = valid_advantages.mean().item()
         avg_advantages_abs: float = valid_advantages.abs().mean().item()
+        avg_response_length = data.metadata["avg_response_length"]
+        # Move training payload to CPU after metric scalars are computed on-device.
+        data = data.to("cpu")
 
         if "metrics" not in data.metadata:
             data.metadata["metrics"] = {}

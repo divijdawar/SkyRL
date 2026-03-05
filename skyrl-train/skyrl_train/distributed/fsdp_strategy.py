@@ -182,13 +182,13 @@ class FSDPStrategy(DistributedStrategy):
                 logger.warning(f"rank {rank} grad_norm is not finite: {grad_norm}")
             else:
                 logger.warning(f"grad_norm is not finite: {grad_norm}")
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             return grad_norm
 
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         return grad_norm
 
     def prepare(
@@ -231,6 +231,7 @@ class FSDPStrategy(DistributedStrategy):
         # sharding strategy
         fsdp_mesh = self.device_mesh
         sharding_strategy = get_sharding_strategy(fsdp_mesh)
+        forward_prefetch = bool(self.fsdp_config.get("forward_prefetch", True))
 
         # Wrap model with FSDP
         if self.fsdp_strategy == "fsdp":
@@ -249,7 +250,7 @@ class FSDPStrategy(DistributedStrategy):
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                forward_prefetch=False,
+                forward_prefetch=forward_prefetch,
             )
         elif self.fsdp_strategy == "fsdp2":
             assert CPUOffloadPolicy is not None, "PyTorch version >= 2.4 is required for using fully_shard API (FSDP2)"
@@ -284,7 +285,7 @@ class FSDPStrategy(DistributedStrategy):
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                forward_prefetch=False,
+                forward_prefetch=forward_prefetch,
             )
         elif self.fsdp_strategy == "shard_grad_op":
             # Shard only gradients and optimizer states, not parameters
@@ -300,7 +301,7 @@ class FSDPStrategy(DistributedStrategy):
                 mixed_precision=mixed_precision,
                 sync_module_states=True,
                 device_mesh=self.device_mesh,
-                forward_prefetch=False,
+                forward_prefetch=forward_prefetch,
             )
         else:
             raise NotImplementedError(
@@ -318,12 +319,18 @@ class FSDPStrategy(DistributedStrategy):
 
         optim_config = self.optimizer_config
         if optim_config is not None:
-            new_optimizer = optim.AdamW(
-                fsdp_module.parameters(),
-                lr=optim_config.lr,
-                betas=optim_config.adam_betas,
-                weight_decay=optim_config.weight_decay,
-            )
+            adamw_kwargs = {
+                "lr": optim_config.lr,
+                "betas": optim_config.adam_betas,
+                "weight_decay": optim_config.weight_decay,
+            }
+            if torch.cuda.is_available():
+                adamw_kwargs["fused"] = bool(self.fsdp_config.get("fused_adamw", True))
+            try:
+                new_optimizer = optim.AdamW(fsdp_module.parameters(), **adamw_kwargs)
+            except TypeError:
+                adamw_kwargs.pop("fused", None)
+                new_optimizer = optim.AdamW(fsdp_module.parameters(), **adamw_kwargs)
 
             lr_scheduler = get_scheduler(
                 optim_config.scheduler,

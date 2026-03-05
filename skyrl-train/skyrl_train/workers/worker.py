@@ -836,12 +836,8 @@ class PolicyWorkerBase(Worker):
                     microbatch_experience = BatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
-                    # Record status for all but the last microbatch in the minibatch.
-                    # The last microbatch should be recorded after the optimizer step.
-                    if microbatch_idx < num_microbatches - 1:
-                        if self.record_memory:
-                            self.save_memory_snapshot(global_step, local_step)
-                        record_status(status)
+                    if microbatch_idx < num_microbatches - 1 and self.record_memory:
+                        self.save_memory_snapshot(global_step, local_step)
 
                     # Local step counts the number of processed microbatches.
                     local_step += 1
@@ -1071,10 +1067,8 @@ class CriticWorkerBase(Worker):
                     microbatch_experience = BatchIterator.batch_to_experience(microbatch)
                     status = self.forward_backward(microbatch_experience, microbatch_weight=microbatch_weight)
 
-                    if microbatch_idx < num_microbatches - 1:
-                        if self.record_memory:
-                            self.save_memory_snapshot(global_step, local_step)
-                        record_status(status)
+                    if microbatch_idx < num_microbatches - 1 and self.record_memory:
+                        self.save_memory_snapshot(global_step, local_step)
 
                     local_step += 1
 

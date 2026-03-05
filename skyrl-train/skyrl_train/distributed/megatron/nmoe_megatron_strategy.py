@@ -258,16 +258,62 @@ class NMoEMegatronStrategy(MegatronStrategy):
             # Middle stages: no special handling needed, grads flow through pipeline
             return
 
-        # For first/last stages with shared experts, sync via all-reduce
-        # This handles the case where expert weights are replicated across stages
+        # For first/last stages with shared experts, sync via coalesced all-reduce
+        # to avoid one collective launch per parameter tensor.
+        pp_group = parallel_state.get_pipeline_model_parallel_group()
+        bucket_cap_mb = max(1, int(os.getenv("SKYRL_PP_EXPERT_GRAD_COALESCE_MB", "64")))
+        bucket_cap_bytes = bucket_cap_mb * 1024 * 1024
+        by_dtype: Dict[torch.dtype, List[torch.Tensor]] = {}
         for name, param in model.named_parameters():
-            if param.grad is not None and ('W1' in name or 'W2' in name or 'W3' in name):
-                # Expert weight - ensure gradient is synced
+            if param.grad is None or ('W1' not in name and 'W2' not in name and 'W3' not in name):
+                continue
+            grad = param.grad
+            if grad.is_sparse:
                 torch.distributed.all_reduce(
-                    param.grad,
+                    grad,
                     op=torch.distributed.ReduceOp.AVG,
-                    group=parallel_state.get_pipeline_model_parallel_group(),
+                    group=pp_group,
                 )
+                continue
+            by_dtype.setdefault(grad.dtype, []).append(grad)
+
+        for grads in by_dtype.values():
+            bucket: List[torch.Tensor] = []
+            bucket_bytes = 0
+            for grad in grads:
+                grad_bytes = int(grad.numel() * grad.element_size())
+                if bucket and bucket_bytes + grad_bytes > bucket_cap_bytes:
+                    if hasattr(torch.distributed, "all_reduce_coalesced"):
+                        torch.distributed.all_reduce_coalesced(
+                            bucket,
+                            op=torch.distributed.ReduceOp.AVG,
+                            group=pp_group,
+                        )
+                    else:
+                        for tensor in bucket:
+                            torch.distributed.all_reduce(
+                                tensor,
+                                op=torch.distributed.ReduceOp.AVG,
+                                group=pp_group,
+                            )
+                    bucket = []
+                    bucket_bytes = 0
+                bucket.append(grad)
+                bucket_bytes += grad_bytes
+            if bucket:
+                if hasattr(torch.distributed, "all_reduce_coalesced"):
+                    torch.distributed.all_reduce_coalesced(
+                        bucket,
+                        op=torch.distributed.ReduceOp.AVG,
+                        group=pp_group,
+                    )
+                else:
+                    for tensor in bucket:
+                        torch.distributed.all_reduce(
+                            tensor,
+                            op=torch.distributed.ReduceOp.AVG,
+                            group=pp_group,
+                        )
 
     def optimizer_step(
         self,
