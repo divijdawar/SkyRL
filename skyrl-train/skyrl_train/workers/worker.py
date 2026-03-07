@@ -690,6 +690,9 @@ class PolicyWorkerBase(Worker):
         attention_mask = experience.attention_mask
         loss_mask = experience.loss_mask
         rollout_action_logprobs = experience.rollout_logprobs
+        routed_experts = experience.routed_experts
+        if self.cfg.trainer.algorithm.get("r3_enabled", False) and routed_experts is None:
+            logger.warning("R3 enabled but no routing data in experience batch — routing replay will be skipped")
 
         # TODO (sumanthrh): don't think this does anything for fsdp rn because autocast happens internally
         with torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
@@ -702,6 +705,7 @@ class PolicyWorkerBase(Worker):
                 return_output=True,
                 compute_entropy=True,
                 entropy_requires_grad=self.cfg.trainer.algorithm.use_entropy_loss,
+                routed_experts=routed_experts,
             )
             # loss function
             # TODO: recompute advantages
@@ -902,6 +906,7 @@ class PolicyWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        routed_experts = micro_batch["routed_experts"] if "routed_experts" in micro_batch else None
 
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
             policy_logprob = self.model(
@@ -910,6 +915,7 @@ class PolicyWorkerBase(Worker):
                 attention_mask,
                 return_output=False,
                 temperature=self.cfg.generator.sampling_params.temperature,
+                routed_experts=routed_experts,
             )
         policy_logprob = policy_logprob.to("cpu")
         output = TrainingOutputBatch(
@@ -1122,8 +1128,11 @@ class RefWorkerBase(Worker):
         sequences = micro_batch["sequences"]
         response_length = micro_batch.metadata["response_length"]
         attention_mask = micro_batch["attention_mask"]
+        routed_experts = micro_batch["routed_experts"] if "routed_experts" in micro_batch else None
         with torch.no_grad(), torch.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            log_probs = self.model(sequences, response_length, attention_mask, return_output=False)
+            log_probs = self.model(
+                sequences, response_length, attention_mask, return_output=False, routed_experts=routed_experts
+            )
         log_probs = log_probs.to("cpu")
         output = TrainingOutputBatch(
             {"output": log_probs},

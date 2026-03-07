@@ -69,6 +69,9 @@ class Experience:
     num_actions: int
     info: Optional[dict]
     kl: Optional[Float[torch.Tensor, "batch response_len"]] = None
+    # R3 (Rollout Routing Replay): MoE expert routing captured during inference.
+    # Shape: [batch, response_len, num_layers, top_k], dtype int32. None when R3 is disabled.
+    routed_experts: Optional[Integer[torch.Tensor, "batch response_len num_layers top_k"]] = None
     metadata: Optional[Dict[str, Any]] = None
 
     @torch.no_grad()
@@ -91,6 +94,8 @@ class Experience:
             self.action_mask = to(self.action_mask, device)
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = to(self.rollout_logprobs, device)
+        if self.routed_experts is not None:
+            self.routed_experts = to(self.routed_experts, device)
 
     def pin_memory(self):
         self.sequences = pin_memory(self.sequences)
@@ -111,6 +116,8 @@ class Experience:
             self.action_mask = self.action_mask.pin_memory()
         if self.rollout_logprobs is not None:
             self.rollout_logprobs = self.rollout_logprobs.pin_memory()
+        if self.routed_experts is not None:
+            self.routed_experts = self.routed_experts.pin_memory()
         return self
 
 

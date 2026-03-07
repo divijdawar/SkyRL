@@ -39,6 +39,7 @@ class TrajectoryOutput:
     prompt_ids: List[int]
     rollout_logprobs: Optional[List[float]]
     env_metrics: Dict[str, Any]
+    routed_experts: Optional[Any] = None  # numpy int32 array (response_len, num_layers, top_k)
 
 
 @dataclass
@@ -67,6 +68,7 @@ class TurnOutput:
     obs_ids: List[int]
     reward: Optional[float]
     added_eos: bool = False
+    routed_experts: Optional[Any] = None  # numpy int32 array (output_len, num_layers, top_k)
 
     def get_turn_loss_mask(self) -> List[int]:
         """
@@ -446,6 +448,9 @@ class SkyRLGymGenerator(GeneratorInterface):
             done=False,
         )
 
+        # R3: collect per-turn routed expert arrays; concatenated and trimmed at final assembly
+        r3_turn_experts: list = []
+
         while not agent_loop_state.done:
 
             if len(agent_loop_state.input_ids) > max_input_length:
@@ -494,6 +499,11 @@ class SkyRLGymGenerator(GeneratorInterface):
                 if self.custom_chat_template is not None:
                     raise ValueError("Response Logprobs bookkeeping is not supported with custom chat template")
 
+            # Extract routed experts for R3 (Rollout Routing Replay)
+            turn_routed_experts = engine_output.get("routed_experts", None)
+            if turn_routed_experts is not None:
+                turn_routed_experts = turn_routed_experts[0]
+
             # Append eos when sampling_params.stop is not None. Does not affect 3.a as chat templates add eos_token.
             # sampling_params is not None for eval, but None for training (which uses engine.sampling_params which are from cfg)
             stop_strs = current_sampling_params.get("stop", None)
@@ -508,6 +518,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                     # dummy logprobs for EOS token id. It will be loss masked with 0 in TurnOutput.get_turn_loss_mask
                     if response_logprobs is not None:
                         response_logprobs.append(0.0)
+                    # Pad routed experts with -1 for the appended EOS token (no routing decision)
+                    if turn_routed_experts is not None:
+                        import numpy as np
+
+                        eos_pad = np.full((1, *turn_routed_experts.shape[1:]), -1, dtype=np.int32)
+                        turn_routed_experts = np.concatenate([turn_routed_experts, eos_pad], axis=0)
                     added_eos = True
 
             # 2. Environment step
@@ -537,6 +553,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 reward=step_reward,
                 obs_ids=obs_ids,
                 added_eos=added_eos,
+                routed_experts=turn_routed_experts,
             )
 
             if is_step_wise:
@@ -556,6 +573,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                     rollout_logprobs=turn_response_logprobs,
                     stop_reason=stop_reason,
                     env_metrics=env.get_metrics() if agent_loop_state.done else {},
+                    routed_experts=turn_output.routed_experts,
                 )
                 agent_loop_output.step_outputs.append(per_step_output)
 
@@ -575,6 +593,13 @@ class SkyRLGymGenerator(GeneratorInterface):
                     agent_loop_state, turn_output
                 )
 
+            # R3: accumulate this turn's routed experts with obs padding for alignment
+            if turn_output.routed_experts is not None and not is_step_wise:
+                import numpy as np
+
+                obs_pad = np.full((len(turn_output.obs_ids), *turn_output.routed_experts.shape[1:]), -1, dtype=np.int32)
+                r3_turn_experts.append(np.concatenate([turn_output.routed_experts, obs_pad], axis=0))
+
             per_step_rewards.append((step_reward, agent_loop_state.response_end_idx))
 
         # Get environment-specific metrics after the episode is done
@@ -591,6 +616,7 @@ class SkyRLGymGenerator(GeneratorInterface):
 
         prompt_ids = agent_loop_state.input_ids[:initial_prompt_length]
         rollout_logprobs = None
+        routed_experts = None
         response_ids = None
 
         # Prepare the final loss_mask, response_ids and rollout_logprobs .
@@ -621,6 +647,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                 rollout_logprobs = agent_loop_state.rollout_logprobs[
                     : agent_loop_state.response_end_idx - initial_prompt_length + 1
                 ]
+            # R3: concatenate per-turn experts and trim to response length
+            if r3_turn_experts:
+                import numpy as np
+
+                resp_len = agent_loop_state.response_end_idx - initial_prompt_length + 1
+                routed_experts = np.concatenate(r3_turn_experts, axis=0)[:resp_len]
             # fix index for per_step_rewards
             per_step_rewards = [(reward, idx - initial_prompt_length) for reward, idx in per_step_rewards]
             assert len(loss_mask) == len(
@@ -637,6 +669,12 @@ class SkyRLGymGenerator(GeneratorInterface):
                 loss_mask.append(1)
                 if rollout_logprobs is not None:
                     rollout_logprobs.append(0.0)
+                # R3: pad routed experts for the appended EOS token
+                if routed_experts is not None:
+                    import numpy as np
+
+                    eos_pad = np.full((1, *routed_experts.shape[1:]), -1, dtype=np.int32)
+                    routed_experts = np.concatenate([routed_experts, eos_pad], axis=0)
                 appended_eos_token = True
 
         if self.generator_cfg.step_wise_trajectories:
@@ -656,6 +694,7 @@ class SkyRLGymGenerator(GeneratorInterface):
                 prompt_ids=prompt_ids,
                 rollout_logprobs=rollout_logprobs,
                 env_metrics=env_metrics,
+                routed_experts=routed_experts,
             )
 
         return agent_loop_output
@@ -1174,6 +1213,18 @@ class SkyRLGymGenerator(GeneratorInterface):
         else:
             rollout_logprobs = None
 
+        # R3: collect routed experts from trajectory outputs
+        if self.generator_cfg.step_wise_trajectories:
+            routed_experts_list = sum(
+                [[step_output.routed_experts for step_output in output.step_outputs] for output in all_outputs],
+                [],
+            )
+        else:
+            routed_experts_list = [output.routed_experts for output in all_outputs]
+        # Set to None if no trajectory had routed experts (R3 disabled or non-MoE model)
+        if all(re is None for re in routed_experts_list):
+            routed_experts_list = None
+
         rollout_metrics = get_rollout_metrics(responses, rewards, env_metrics, env_classes)
 
         if self.generator_cfg.zero_reward_on_non_stop:
@@ -1193,6 +1244,7 @@ class SkyRLGymGenerator(GeneratorInterface):
             "rollout_logprobs": rollout_logprobs,
             "trajectory_ids": out_trajectory_ids,
             "is_last_step": is_last_step,
+            "routed_experts": routed_experts_list,
         }
 
         return generator_output

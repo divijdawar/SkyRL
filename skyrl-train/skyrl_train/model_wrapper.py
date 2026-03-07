@@ -13,6 +13,7 @@ import transformers
 from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 import numpy as np
 from skyrl_train.distributed.ulysses.utils import ulysses_pad_and_slice_inputs, gather_outputs_and_unpad
+from skyrl_train.utils.r3_routing_replay import r3_routing_replay
 from skyrl_train.utils.torch_utils import chunked_entropy_from_logits, logprobs_from_logits
 try:
     from flash_attn.bert_padding import pad_input, unpad_input
@@ -283,8 +284,11 @@ class HFModelWrapper(nn.Module):
         return_output=False,
         compute_entropy=False,
         entropy_requires_grad=True,
+        routed_experts: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Returns action log probs"""
+        if routed_experts is not None and self.use_sample_packing:
+            raise ValueError("R3 routing replay is not supported with sample packing.")
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
 
@@ -319,12 +323,14 @@ class HFModelWrapper(nn.Module):
             )
 
         # NOTE (sumanthrh): Once we have position_ids, we don't need attention mask with flash attention.
-        if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
-            # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
-            # Not using attention mask leads to higher perf since flash attention varlen func is enabled
-            output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
-        else:
-            output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
+        # R3: Wrap model forward with routing replay context. No-op when routed_experts is None.
+        with r3_routing_replay(self.model, routed_experts):
+            if self.use_sample_packing and self.attn_implementation == "flash_attention_2":
+                # NOTE (sumanthrh): Don't use attention mask. position_ids is enough.
+                # Not using attention mask leads to higher perf since flash attention varlen func is enabled
+                output = self.model(sequences_fwd, attention_mask=None, position_ids=position_ids_fwd)
+            else:
+                output = self.model(sequences_fwd, attention_mask=attention_mask_fwd, position_ids=position_ids_fwd)
 
         logits_BSV = output["logits"]
         logits_BSV.div_(temperature)

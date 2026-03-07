@@ -41,6 +41,9 @@ class GeneratorOutput(TypedDict):
     trajectory_ids: Optional[List[TrajectoryID]]
     # Applicable only for step-wise training
     is_last_step: Optional[List[bool]]
+    # R3 (Rollout Routing Replay): MoE expert routing captured during inference.
+    # Each element is a numpy int32 array of shape (response_len, num_layers, top_k).
+    routed_experts: Optional[List[Any]]
 
 
 class MetricsOutput(TypedDict):

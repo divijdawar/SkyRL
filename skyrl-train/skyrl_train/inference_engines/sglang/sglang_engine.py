@@ -720,6 +720,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         multi_token_stop_seqs: Optional[List[List[int]]] = None,
         stop_regex: Optional[str] = None,
         extract_hidden_states: bool = False,
+        extract_routed_experts: bool = False,
     ):
         """Process SGLang outputs to match expected format.
 
@@ -732,12 +733,16 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             stop_regex: Regex pattern to stop at (applied via post-processing).
             extract_hidden_states: Whether to extract and return hidden states.
                 Requires engine to be initialized with enable_return_hidden_states=True.
+            extract_routed_experts: Whether to extract and return routed expert indices.
+                Requires SGLang to be started with return_routed_experts=True.
+                Used for R3 (Rollout Routing Replay) to stabilize MoE RL training.
 
         Returns:
             InferenceEngineOutput with responses, response_ids, stop_reasons, optionally logprobs,
             weight_version for tracking which training step's weights generated the output,
             n_per_prompt for reconstructing per-prompt groups, optionally request_ids
-            for session-based generation, and optionally hidden_states for RL.
+            for session-based generation, optionally hidden_states for RL,
+            and optionally routed_experts for R3.
         """
         responses: List[str] = []
         stop_reasons: List[str] = []
@@ -745,6 +750,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         response_logprobs: Optional[List[List[float]]] = [] if return_logprobs else None
         request_ids: Optional[List[str]] = [] if extract_request_ids else None
         hidden_states: Optional[List[Any]] = [] if extract_hidden_states else None
+        routed_experts: Optional[List[Any]] = [] if extract_routed_experts else None
         weight_version: Optional[str] = None
 
         for output in outputs:
@@ -807,6 +813,13 @@ class SGLangInferenceEngine(InferenceEngineInterface):
                 output_hidden_states = meta_info.get("hidden_states", None)
                 hidden_states.append(output_hidden_states)
 
+            # Extract routed expert indices if requested and available
+            # Used for R3 (Rollout Routing Replay) to stabilize MoE RL training
+            if extract_routed_experts:
+                meta_info = output.get("meta_info", {})
+                output_routed_experts = meta_info.get("routed_experts", None)
+                routed_experts.append(output_routed_experts)
+
         # Convert empty logprobs list to None to match expected interface behavior
         # This prevents IndexError when generator tries to access response_logprobs[0]
         if response_logprobs is not None and len(response_logprobs) == 0:
@@ -815,6 +828,10 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         # Convert empty hidden_states list to None
         if hidden_states is not None and len(hidden_states) == 0:
             hidden_states = None
+
+        # Convert empty routed_experts list to None
+        if routed_experts is not None and len(routed_experts) == 0:
+            routed_experts = None
 
         return InferenceEngineOutput(
             responses=responses,
@@ -825,6 +842,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             n_per_prompt=n_per_prompt if (n_per_prompt is not None and n_per_prompt > 1) else None,
             request_ids=request_ids,
             hidden_states=hidden_states,
+            routed_experts=routed_experts,
         )
 
     async def generate(self, input_batch: InferenceEngineInput) -> InferenceEngineOutput:
@@ -869,6 +887,12 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         return_hidden_states = sampling_params.pop("return_hidden_states", False)
         if not return_hidden_states:
             return_hidden_states = input_batch.get("return_hidden_states", False)
+
+        # Extract routed experts parameter for R3 (Rollout Routing Replay)
+        # Captures which MoE experts were routed to during inference for replay during training
+        return_routed_experts = sampling_params.pop("return_routed_experts", False)
+        if not return_routed_experts:
+            return_routed_experts = input_batch.get("return_routed_experts", False)
 
         # Extract custom_logit_processor (request-level field, not a SamplingParams field)
         # This is the serialized processor string from CustomLogitProcessor.to_str()
@@ -933,6 +957,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
                     logprob_start_len=logprob_start_len,
                     top_logprobs_num=top_logprobs_num,
                     return_hidden_states=return_hidden_states,
+                    return_routed_experts=return_routed_experts,
                     custom_logit_processor=custom_logit_processor,
                     priority=priority,
                     lora_path=lora_name,  # SGLang uses lora_path to reference pre-loaded adapters by name
@@ -947,6 +972,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
                     multi_token_stop_seqs=multi_token_stop_seqs,
                     stop_regex=stop_regex,
                     extract_hidden_states=return_hidden_states,
+                    extract_routed_experts=return_routed_experts,
                 )
             except Exception as e:
                 last_error = e
@@ -2411,6 +2437,11 @@ class SGLangInferenceEngine(InferenceEngineInterface):
         if not return_hidden_states:
             return_hidden_states = input_batch.get("return_hidden_states", False)
 
+        # Extract routed experts parameter for R3 (Rollout Routing Replay)
+        return_routed_experts = sampling_params.pop("return_routed_experts", False)
+        if not return_routed_experts:
+            return_routed_experts = input_batch.get("return_routed_experts", False)
+
         # Extract per-request LoRA adapter name
         lora_name = sampling_params.pop("lora_name", None)
 
@@ -2443,6 +2474,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
             custom_logit_processor=custom_logit_processor,
             lora_path=lora_name,  # SGLang uses lora_path to reference pre-loaded adapters by name
             return_hidden_states=return_hidden_states,
+            return_routed_experts=return_routed_experts,
         )
 
         try:
@@ -2459,6 +2491,7 @@ class SGLangInferenceEngine(InferenceEngineInterface):
                 n_per_prompt=n_per_prompt,
                 extract_request_ids=True,  # Extract rids for session continuity
                 extract_hidden_states=return_hidden_states,
+                extract_routed_experts=return_routed_experts,
             )
         except Exception as e:
             raise RuntimeError(f"Session generation failed for session '{session_id}': {e}") from e

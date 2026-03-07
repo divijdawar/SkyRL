@@ -1,4 +1,5 @@
 from typing import List, Tuple, Optional
+import numpy as np
 import torch
 from transformers import AutoTokenizer
 from jaxtyping import Float
@@ -130,3 +131,33 @@ def convert_prompts_responses_to_batch_tensors(
         logprobs_tensor = torch.tensor(padded_logprobs, dtype=torch.float)
 
     return sequences, attention_mask, action_mask, ret_rewards, ret_loss_masks, logprobs_tensor
+
+
+def pad_and_stack_routed_experts(
+    routed_experts: List[np.ndarray],
+    max_response_len: int,
+) -> torch.Tensor:
+    """Pad variable-length routed_experts arrays and stack into a batch tensor.
+
+    Each element is a numpy int32 array of shape (response_len_i, num_layers, top_k).
+    Pads along the response_len dimension to max_response_len using -1 (sentinel for
+    "no routing info"), then stacks into a single tensor.
+
+    Args:
+        routed_experts: Per-sample expert routing arrays from inference.
+        max_response_len: Target response length to pad to.
+
+    Returns:
+        Tensor of shape (batch, max_response_len, num_layers, top_k), dtype int32.
+    """
+    padded = []
+    for arr in routed_experts:
+        resp_len = arr.shape[0]
+        pad_len = max_response_len - resp_len
+        if pad_len > 0:
+            pad_shape = (pad_len, *arr.shape[1:])
+            arr = np.concatenate([arr, np.full(pad_shape, -1, dtype=np.int32)], axis=0)
+        elif pad_len < 0:
+            arr = arr[:max_response_len]
+        padded.append(arr)
+    return torch.tensor(np.stack(padded), dtype=torch.int32)

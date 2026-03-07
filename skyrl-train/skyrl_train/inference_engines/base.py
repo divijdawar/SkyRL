@@ -17,6 +17,8 @@ class InferenceEngineInput(TypedDict):
     session_ids: Optional[List[Hashable]]
     # Whether to return hidden states from the model (for value function, representation learning)
     return_hidden_states: Optional[bool]
+    # Capture routed experts for R3 rollout
+    return_routed_experts: Optional[bool]
     # Multimodal support: image data for vision-language models.
     # Can be a list of image inputs (one per prompt), where each can be:
     # - str: File path, URL, or base64-encoded image
@@ -62,6 +64,8 @@ class InferenceEngineOutput(TypedDict):
     # Useful for value function enrichment, representation learning, and RL state extraction.
     # Each entry corresponds to a generated response.
     hidden_states: Optional[List[Any]]
+    # numpy int32 arrays of shape(response_len * num_layers * top_k)
+    routed_experts: Optional[List[Any]]
 
 
 class StreamingChunk(TypedDict):

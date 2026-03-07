@@ -333,6 +333,9 @@ class TrainingInput(TypedDict, total=False):
     kl: Float[torch.Tensor, "batch_size seq_len"]
     rewards: Optional[Float[torch.Tensor, "batch_size seq_len"]]
     rollout_logprobs: Optional[Float[torch.Tensor, "batch_size seq_len"]]
+    # R3 (Rollout Routing Replay): MoE expert routing captured during inference.
+    # Shape: [batch_size, response_len, num_layers, top_k], dtype int32. -1 = padding.
+    routed_experts: Optional[Integer[torch.Tensor, "batch_size response_len num_layers top_k"]]
 
 
 class TrainingInputBatch(TensorBatch[TrainingInput]):

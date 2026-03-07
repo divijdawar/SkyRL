@@ -26,6 +26,8 @@ try:
         chunked_entropy_from_logits,
         logprobs_from_logits,
     )
+    from skyrl_train.utils.r3_routing_replay import r3_routing_replay
+
     SKYRL_UTILS_AVAILABLE = True
 except ImportError:
     SKYRL_UTILS_AVAILABLE = False
@@ -411,6 +413,7 @@ class NMoEModelWrapper(nn.Module, NMoEModelInterface):
         return_output: bool = False,
         compute_entropy: bool = False,
         entropy_requires_grad: bool = True,
+        routed_experts: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, Dict[str, Any]]]:
         """Forward pass returning action log probabilities for RL training.
 
@@ -425,6 +428,7 @@ class NMoEModelWrapper(nn.Module, NMoEModelInterface):
             return_output: If True, return (log_probs, output_dict)
             compute_entropy: If True, compute entropy in output_dict
             entropy_requires_grad: Whether entropy computation needs gradients
+            routed_experts: R3 routing replay tensor [batch, response_len, num_layers, top_k] (optional)
 
         Returns:
             action_log_probs: Log probabilities of action tokens [batch, num_actions]
@@ -437,9 +441,10 @@ class NMoEModelWrapper(nn.Module, NMoEModelInterface):
         else:
             position_ids = None
 
-        # Forward through nmoe model
+        # Forward through nmoe model (with R3 routing replay if enabled)
         # nmoe Transformer takes tokens and returns logits directly
-        logits = self.model(sequences)  # [batch, seq_len, vocab_size]
+        with r3_routing_replay(self.model, routed_experts):
+            logits = self.model(sequences)  # [batch, seq_len, vocab_size]
 
         # Apply temperature
         effective_temp = temperature if temperature != 1.0 else self.temperature

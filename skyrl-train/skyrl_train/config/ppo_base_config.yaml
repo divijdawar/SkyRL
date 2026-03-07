@@ -131,6 +131,8 @@ trainer:
     # Truncated Importance Sampling as proposed in https://fengyao.notion.site/off-policy-rl 
     tis_imp_ratio_cap: -1.0
     use_tis: false
+    # R3 (Rollout Routing Replay) for MoE models — replay inference expert routing during training
+    r3_enabled: false
     # SAPO parameters (only used when policy_loss_type: "sapo") (https://arxiv.org/pdf/2511.20347)
     sapo:
       tau_pos: 1.0

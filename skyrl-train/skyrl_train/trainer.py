@@ -28,6 +28,7 @@ import copy
 from skyrl_train.generators.utils import get_metrics_from_generator_output, prepare_generator_input
 from skyrl_train.dataset.preprocess import (
     convert_prompts_responses_to_batch_tensors,
+    pad_and_stack_routed_experts,
 )
 from skyrl_train.utils import ppo_utils, trainer_utils
 from skyrl_train.utils.io import io
@@ -109,6 +110,13 @@ class RayPPOTrainer:
 
         self.reward_kl_controller: Optional[Union[FixedKLController, AdaptiveKLController]] = None
         configure_ray_worker_logging()
+
+        # R3 (Rollout Routing Replay) status
+        r3_enabled = self.cfg.trainer.algorithm.get("r3_enabled", False)
+        if r3_enabled:
+            logger.info("R3 (Rollout Routing Replay): ENABLED — MoE expert routing will be captured during inference and replayed during training")
+        else:
+            logger.debug("R3 (Rollout Routing Replay): DISABLED")
 
     def _build_train_dataloader_and_compute_training_steps(self):
         """
@@ -221,10 +229,17 @@ class RayPPOTrainer:
 
                     # 0. truncate data to have even shards
                     rand_prompts = self._remove_tail_data(rand_prompts)
+                    sampling_params = get_sampling_params_for_backend(
+                        self.cfg.generator.backend, self.cfg.generator.sampling_params
+                    )
+                    # R3: inject return_routed_experts into sampling_params so SGLang captures routing
+                    if self.cfg.trainer.algorithm.get("r3_enabled", False):
+                        sampling_params["return_routed_experts"] = True
+
                     generator_input, uids = prepare_generator_input(
                         rand_prompts,
                         self.cfg.generator.n_samples_per_prompt,
-                        get_sampling_params_for_backend(self.cfg.generator.backend, self.cfg.generator.sampling_params),
+                        sampling_params,
                         self.cfg.environment.env_class,
                         "train",
                         self.global_step,
@@ -634,6 +649,25 @@ class RayPPOTrainer:
                 rollout_logprobs_tensor is not None
             ), "expected non-null rollout logprobs tensor with  `trainer.algorithm.use_tis` as `True`"
             assert rollout_logprobs_tensor.shape == loss_masks_tensor.shape, "Logprobs should look like responses"
+        # R3: Convert routed_experts numpy arrays to a padded batch tensor
+        routed_experts_tensor = None
+        r3_enabled = self.cfg.trainer.algorithm.get("r3_enabled", False)
+        routed_experts_list = generator_output.get("routed_experts", None)
+        if routed_experts_list is not None:
+            max_resp_len = response_masks_tensor.shape[1]
+            routed_experts_tensor = pad_and_stack_routed_experts(routed_experts_list, max_resp_len)
+            # R3 observability: log tensor shape and routing coverage
+            coverage = (routed_experts_tensor >= 0).float().mean().item()
+            logger.info(
+                f"R3: routed_experts shape={list(routed_experts_tensor.shape)}, "
+                f"coverage={coverage:.2%} (fraction of non-padding entries)"
+            )
+        elif r3_enabled:
+            logger.warning(
+                "R3 enabled but no routing data received from generator. "
+                "Check that your SGLang version supports return_routed_experts."
+            )
+
         training_input = TrainingInputBatch(
             {
                 "sequences": sequences_tensor,  # Full trajectories (padded and concatenated prompts and responses)
@@ -642,6 +676,7 @@ class RayPPOTrainer:
                 "rewards": rewards_tensor,
                 "loss_mask": loss_masks_tensor,
                 "rollout_logprobs": rollout_logprobs_tensor,
+                "routed_experts": routed_experts_tensor,
                 "is_last_step": (
                     torch.tensor(generator_output["is_last_step"], dtype=torch.bool)
                     if generator_output.get("is_last_step", None) is not None
@@ -940,7 +975,9 @@ class RayPPOTrainer:
             - `["action_log_probs"]`: Float[torch.Tensor, "batch_size seqlen"]
             - `["values"]`: Float[torch.Tensor, "batch_size seqlen"]
         """
-        data_fwd_pass = training_input.select(keys=["sequences", "attention_mask"], metadata_keys=["response_length"])
+        data_fwd_pass = training_input.select(
+            keys=["sequences", "attention_mask", "routed_experts"], metadata_keys=["response_length"]
+        )
 
         def collect_results(actor_infos, results, key):
             ret_outputs: TrainingOutputBatch = concatenate_outputs_after_mesh_dispatch(actor_infos, results)
